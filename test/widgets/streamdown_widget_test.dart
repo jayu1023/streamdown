@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:streamdown/streamdown.dart';
+import 'package:streamdown/src/render/ast_renderer.dart';
 
 /// Pump a [Streamdown.text] inside a [MaterialApp] scaffold.
 Future<void> pumpStatic(
@@ -182,6 +183,18 @@ void main() {
   });
 
   group('Streamdown — streaming stability', () {
+    testWidgets('static text replacement does not reuse cached block output', (
+      tester,
+    ) async {
+      await pumpStatic(tester, 'first paragraph\n');
+      expect(find.textContaining('first paragraph'), findsWidgets);
+
+      await pumpStatic(tester, 'second paragraph\n');
+
+      expect(find.textContaining('second paragraph'), findsWidgets);
+      expect(find.textContaining('first paragraph'), findsNothing);
+    });
+
     testWidgets(
       'closed widgets persist across chunk feeds (no element churn)',
       (tester) async {
@@ -243,5 +256,328 @@ void main() {
       await tester.pump();
       expect(find.textContaining('hello world'), findsWidgets);
     });
+
+    testWidgets('parseIncompleteMarkdown renders a partial trailing line', (
+      tester,
+    ) async {
+      final controller = StreamController<String>();
+      addTearDown(controller.close);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Streamdown(
+              stream: controller.stream,
+              parseIncompleteMarkdown: true,
+            ),
+          ),
+        ),
+      );
+
+      controller.add('hello while still streaming');
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.textContaining('hello while still streaming', findRichText: true),
+        findsWidgets,
+      );
+    });
+
+    testWidgets('remended inline markdown does not skip later real text', (
+      tester,
+    ) async {
+      final controller = StreamController<String>();
+      addTearDown(controller.close);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Streamdown(
+              stream: controller.stream,
+              parseIncompleteMarkdown: true,
+            ),
+          ),
+        ),
+      );
+
+      controller.add('a **bol');
+      await tester.pump();
+      await tester.pump();
+      expect(find.textContaining('a bol', findRichText: true), findsWidgets);
+
+      controller.add('d** after');
+      await tester.pump();
+      await tester.pump();
+
+      final richText = tester.widget<RichText>(find.byType(RichText).first);
+      expect(richText.text.toPlainText(), contains('a bold after'));
+    });
+
+    testWidgets(
+      'animated stream keeps prose out of WidgetSpans after reparse',
+      (tester) async {
+        final controller = StreamController<String>();
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Streamdown(
+                stream: controller.stream,
+                parseIncompleteMarkdown: true,
+                animated: true,
+                animateConfig: const AnimateConfig(stagger: 0),
+              ),
+            ),
+          ),
+        );
+
+        controller.add('hello');
+        await tester.pump();
+        await tester.pump();
+
+        expect(_widgetSpanCount(tester), 0);
+
+        controller.add(' world');
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          _widgetSpanCount(tester),
+          0,
+          reason: 'ordinary prose must use native TextSpan layout',
+        );
+
+        unawaited(controller.close());
+        await tester.pump();
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets(
+      'animated iPhone-width stream wraps identically before and after completion',
+      (tester) async {
+        final controller = StreamController<String>();
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.topLeft,
+                child: SizedBox(
+                  width: 345,
+                  child: Streamdown(
+                    stream: controller.stream,
+                    parseIncompleteMarkdown: true,
+                    animated: true,
+                    animateConfig: const AnimateConfig(stagger: 18),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        controller.add('Sure — here’s a clean sam');
+        await tester.pump();
+        controller.add('ple CV you can use as a template.');
+        await tester.pump();
+        await tester.pump();
+
+        final streamingParagraph = tester.widget<RichText>(
+          find.byType(RichText).first,
+        );
+        final streamingHeight = tester
+            .getSize(find.byType(RichText).first)
+            .height;
+        expect(
+          streamingParagraph.text.toPlainText(),
+          'Sure — here’s a clean sample CV you can use as a template.',
+        );
+        expect(_countWidgetSpans(streamingParagraph.text), 0);
+
+        unawaited(controller.close());
+        await tester.pump();
+        await tester.pumpAndSettle();
+
+        final completedParagraph = tester.widget<RichText>(
+          find.byType(RichText).first,
+        );
+        final completedHeight = tester
+            .getSize(find.byType(RichText).first)
+            .height;
+        expect(
+          completedParagraph.text.toPlainText(),
+          streamingParagraph.text.toPlainText(),
+        );
+        expect(completedHeight, streamingHeight);
+        expect(_countWidgetSpans(completedParagraph.text), 0);
+      },
+    );
+
+    testWidgets('animated markdown preserves soft breaks, blocks, and lists', (
+      tester,
+    ) async {
+      final controller = StreamController<String>();
+      addTearDown(controller.close);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 345,
+              child: Streamdown(
+                stream: controller.stream,
+                animated: true,
+                animateConfig: const AnimateConfig(),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      controller.add(
+        'A soft\nline with **bold** text.\n\n'
+        '1. Full name\n2. Phone number and email\n\n'
+        '- First skill\n- Second skill\n',
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final prose = tester.widget<RichText>(find.byType(RichText).first);
+      expect(prose.text.toPlainText(), 'A soft line with bold text.');
+      for (final richText in tester.widgetList<RichText>(
+        find.byType(RichText),
+      )) {
+        expect(_countWidgetSpans(richText.text), 0);
+      }
+      expect(find.text('1.', findRichText: true), findsOneWidget);
+      expect(find.text('2.', findRichText: true), findsOneWidget);
+      expect(find.text('•', findRichText: true), findsNWidgets(2));
+
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets(
+      'PDF response reconciles provisional paragraphs into lists before completion',
+      (tester) async {
+        final controller = StreamController<String>();
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 345,
+                child: Streamdown(
+                  stream: controller.stream,
+                  animated: true,
+                  parseIncompleteMarkdown: true,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        const chunks = <String>[
+          'Yes',
+          ' — I can',
+          ' create a PDF for you.\n\nSend me:\n-',
+          ' the text/content\n-',
+          ' any title or layout',
+          ' preference\n- if you want',
+          ' it from a file, upload it\n\nI can also turn a',
+          ' document into PDF if you want.',
+        ];
+
+        for (final chunk in chunks) {
+          controller.add(chunk);
+          await tester.pump();
+          await tester.pump();
+        }
+
+        expect(find.text('•', findRichText: true), findsNWidgets(3));
+        expect(
+          find.textContaining(
+            'any title or layout preference',
+            findRichText: true,
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining(
+            'if you want it from a file, upload it',
+            findRichText: true,
+          ),
+          findsOneWidget,
+        );
+
+        final rendererBeforeCompletion = tester.element(
+          find.byType(AstRenderer),
+        );
+        unawaited(controller.close());
+        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(
+          identical(
+            rendererBeforeCompletion,
+            tester.element(find.byType(AstRenderer)),
+          ),
+          isTrue,
+          reason: 'completion must reconcile through the existing renderer',
+        );
+        expect(find.text('•', findRichText: true), findsNWidgets(3));
+      },
+    );
+
+    testWidgets('block type changes replace the keyed child immediately', (
+      tester,
+    ) async {
+      final controller = StreamController<String>();
+      addTearDown(controller.close);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Streamdown(
+              stream: controller.stream,
+              parseIncompleteMarkdown: true,
+            ),
+          ),
+        ),
+      );
+
+      controller.add('Send me:\n-');
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('•', findRichText: true), findsNothing);
+
+      controller.add(' the text/content');
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('•', findRichText: true), findsOneWidget);
+      expect(
+        find.textContaining('the text/content', findRichText: true),
+        findsOneWidget,
+      );
+    });
   });
+}
+
+int _widgetSpanCount(WidgetTester tester) {
+  final richText = tester.widget<RichText>(find.byType(RichText).first);
+  return _countWidgetSpans(richText.text);
+}
+
+int _countWidgetSpans(InlineSpan span) {
+  var count = span is WidgetSpan ? 1 : 0;
+  if (span is TextSpan) {
+    for (final child in span.children ?? const <InlineSpan>[]) {
+      count += _countWidgetSpans(child);
+    }
+  }
+  return count;
 }

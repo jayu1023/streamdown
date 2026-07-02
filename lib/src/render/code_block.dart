@@ -16,57 +16,104 @@ import 'package:flutter_highlight/flutter_highlight.dart' show HighlightView;
 import '../parser/ast.dart';
 import 'syntax_theme.dart';
 
-class CodeBlockWidget extends StatelessWidget {
+class CodeBlockWidget extends StatefulWidget {
   const CodeBlockWidget({
     super.key,
     required this.node,
     required this.syntaxTheme,
     this.builder,
+    this.showLineNumbers = true,
   });
 
   final CodeBlockNode node;
   final SyntaxTheme syntaxTheme;
   final CodeBlockBuilder? builder;
+  final bool showLineNumbers;
+
+  @override
+  State<CodeBlockWidget> createState() => _CodeBlockWidgetState();
+}
+
+class _CodeBlockWidgetState extends State<CodeBlockWidget> {
+  Widget? _cached;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _cached = null;
+  }
+
+  @override
+  void didUpdateWidget(covariant CodeBlockWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.syntaxTheme != oldWidget.syntaxTheme ||
+        widget.builder != oldWidget.builder ||
+        widget.showLineNumbers != oldWidget.showLineNumbers) {
+      _cached = null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (builder != null) {
-      return builder!(context, node.language, node.content, node.isComplete);
+    if (widget.node.isComplete && _cached != null) {
+      return _cached!;
     }
 
-    final theme = Theme.of(context);
-    final bg = syntaxTheme.effectiveBackground(
-      theme.colorScheme.surfaceContainerHighest,
-    );
-    final fg = syntaxTheme.effectiveDefaultColor(theme.colorScheme.onSurface);
+    Widget result;
+    if (widget.builder != null) {
+      result = widget.builder!(
+        context,
+        widget.node.language,
+        widget.node.content,
+        widget.node.isComplete,
+      );
+    } else {
+      final theme = Theme.of(context);
+      final bg = widget.syntaxTheme.effectiveBackground(
+        theme.colorScheme.surfaceContainerHighest,
+      );
+      final fg = widget.syntaxTheme.effectiveDefaultColor(
+        theme.colorScheme.onSurface,
+      );
 
-    return Container(
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
-        ),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          _CodeHeader(language: node.language, code: node.content),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-            child: _CodeBody(
-              code: node.content,
-              language: node.language,
-              syntaxTheme: syntaxTheme,
-              defaultColor: fg,
-            ),
+      result = Container(
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
           ),
-        ],
-      ),
-    );
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            _CodeHeader(
+              language: widget.node.language,
+              code: widget.node.content,
+            ),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+              child: _CodeBody(
+                code: widget.node.content,
+                language: widget.node.language,
+                syntaxTheme: widget.syntaxTheme,
+                defaultColor: fg,
+                showLineNumbers: widget.showLineNumbers,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (widget.node.isComplete) {
+      _cached = result;
+    }
+
+    return result;
   }
 }
 
@@ -79,12 +126,14 @@ class _CodeBody extends StatelessWidget {
     required this.language,
     required this.syntaxTheme,
     required this.defaultColor,
+    this.showLineNumbers = true,
   });
 
   final String code;
   final String? language;
   final SyntaxTheme syntaxTheme;
   final Color defaultColor;
+  final bool showLineNumbers;
 
   @override
   Widget build(BuildContext context) {
@@ -95,14 +144,45 @@ class _CodeBody extends StatelessWidget {
       height: 1.45,
       color: defaultColor,
     );
-    if (language == null || language!.isEmpty) {
-      return Text(code, style: monoStyle);
-    }
-    return HighlightView(
-      code,
-      language: language,
-      theme: syntaxTheme.classes,
-      textStyle: monoStyle,
+
+    final lines = code.split('\n');
+    final codeWidget = language == null || language!.isEmpty
+        ? Text(code, style: monoStyle)
+        : HighlightView(
+            code,
+            language: language,
+            theme: syntaxTheme.classes,
+            textStyle: monoStyle,
+          );
+
+    if (!showLineNumbers || lines.length <= 1) return codeWidget;
+
+    final lineNumStyle = monoStyle.copyWith(
+      color: defaultColor.withValues(alpha: 0.4),
+    );
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: <Widget>[
+            for (var i = 1; i <= lines.length; i++)
+              SizedBox(
+                height: monoStyle.height != null
+                    ? (monoStyle.fontSize! * monoStyle.height!)
+                    : monoStyle.fontSize! * 1.45,
+                child: Text(
+                  '$i',
+                  style: lineNumStyle,
+                  textAlign: TextAlign.right,
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(width: 12),
+        codeWidget,
+      ],
     );
   }
 }

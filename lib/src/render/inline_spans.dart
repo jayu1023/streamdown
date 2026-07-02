@@ -3,11 +3,6 @@
 // CommonMark's "process emphasis" algorithm is replaced with a simpler
 // stack-based pairing: every delimiter toggles a counter, and the current
 // counter values determine the active text style at any point.
-//
-// Trade-off: this isn't fully spec-compliant for pathological cases like
-// `*foo**bar*baz**`. In real-world AI markdown, delimiters always nest
-// well, so this is sufficient for v0.1. Spec-compliant pairing is a v0.2
-// upgrade if needed.
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -15,40 +10,38 @@ import 'package:flutter_math_fork/flutter_math.dart' show Math, MathStyle;
 
 import '../parser/inline_tokenizer.dart';
 import '../parser/token.dart';
+import 'animation.dart';
 
-/// Tokenize [text] and return the corresponding [InlineSpan]s, applying
-/// [baseStyle] and theme-aware decoration for code spans and links.
-///
-/// [recognizers] is filled with any [GestureRecognizer]s created for link
-/// taps; the caller is responsible for disposing them when the parent
-/// widget is disposed (otherwise they leak).
-List<InlineSpan> buildInlineSpans(
+/// Tokenize [text] and return the corresponding [InlineSpan]s plus the
+/// rendered visible-text length used for streaming animation bookkeeping.
+({List<InlineSpan> spans, int renderedLength}) buildInlineSpans(
   String text,
   BuildContext context, {
   TextStyle? baseStyle,
   void Function(Uri uri)? onLinkTap,
   required List<GestureRecognizer> recognizers,
   bool latex = false,
+  bool cjk = false,
+  AnimateConfig? animateConfig,
+  bool streaming = false,
+  int prevContentLength = 0,
+  double animationElapsedMs = double.infinity,
 }) {
-  final tokens = InlineTokenizer.tokenize(text, latex: latex);
+  final tokens = InlineTokenizer.tokenize(text, latex: latex, cjk: cjk);
   final theme = Theme.of(context);
   final base = baseStyle ?? DefaultTextStyle.of(context).style;
 
   var strong = 0;
   var em = 0;
   var strike = 0;
+  var charOffset = 0;
+  var animatedSpanOffset = 0;
 
   TextStyle styleNow() {
     var s = base;
-    if (strong > 0) {
-      s = s.copyWith(fontWeight: FontWeight.bold);
-    }
-    if (em > 0) {
-      s = s.copyWith(fontStyle: FontStyle.italic);
-    }
-    if (strike > 0) {
-      s = s.copyWith(decoration: TextDecoration.lineThrough);
-    }
+    if (strong > 0) s = s.copyWith(fontWeight: FontWeight.bold);
+    if (em > 0) s = s.copyWith(fontStyle: FontStyle.italic);
+    if (strike > 0) s = s.copyWith(decoration: TextDecoration.lineThrough);
     return s;
   }
 
@@ -76,10 +69,32 @@ List<InlineSpan> buildInlineSpans(
   }
 
   final spans = <InlineSpan>[];
+  var renderedLength = 0;
   for (final token in tokens) {
     switch (token) {
       case InlineTextToken(:final text):
-        spans.add(TextSpan(text: text, style: styleNow()));
+        renderedLength += text.length;
+        final oldLength = (prevContentLength - charOffset).clamp(
+          0,
+          text.length,
+        );
+        charOffset = buildAnimatedSpans(
+          text,
+          styleNow(),
+          config: animateConfig,
+          streaming: streaming,
+          prevContentLength: prevContentLength,
+          charOffset: charOffset,
+          out: spans,
+          animationElapsedMs: animationElapsedMs,
+          newSpanOffset: animatedSpanOffset,
+        );
+        if (streaming && animateConfig != null) {
+          animatedSpanOffset += animatedSegmentCount(
+            text.substring(oldLength),
+            animateConfig,
+          );
+        }
       case StrongDelimToken():
         if (strong > 0) {
           strong--;
@@ -99,7 +114,9 @@ List<InlineSpan> buildInlineSpans(
           strike++;
         }
       case CodeSpanToken(:final content):
+        renderedLength += content.length;
         spans.add(TextSpan(text: content, style: codeSpanStyle()));
+        charOffset += content.length;
       case LinkToken(:final text, :final url, :final isImage):
         if (isImage) {
           spans.add(
@@ -130,6 +147,7 @@ List<InlineSpan> buildInlineSpans(
             ),
           );
         } else {
+          renderedLength += text.length;
           spans.add(
             TextSpan(
               text: text,
@@ -137,8 +155,10 @@ List<InlineSpan> buildInlineSpans(
               recognizer: makeTapRecognizer(url),
             ),
           );
+          charOffset += text.length;
         }
       case AutolinkToken(:final url):
+        renderedLength += url.length;
         spans.add(
           TextSpan(
             text: url,
@@ -146,8 +166,11 @@ List<InlineSpan> buildInlineSpans(
             recognizer: makeTapRecognizer(url),
           ),
         );
+        charOffset += url.length;
       case HardBreakToken():
+        renderedLength += 1;
         spans.add(const TextSpan(text: '\n'));
+        charOffset += 1;
       case MathToken(:final tex, :final isBlock):
         spans.add(
           WidgetSpan(
@@ -163,7 +186,6 @@ List<InlineSpan> buildInlineSpans(
             ),
           ),
         );
-      // Block-level tokens should never reach here.
       case HeadingToken() ||
           HorizontalRuleToken() ||
           BlockquoteMarkerToken() ||
@@ -178,5 +200,5 @@ List<InlineSpan> buildInlineSpans(
         break;
     }
   }
-  return spans;
+  return (spans: spans, renderedLength: renderedLength);
 }

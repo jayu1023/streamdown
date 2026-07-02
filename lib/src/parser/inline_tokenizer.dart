@@ -18,10 +18,22 @@ class InlineTokenizer {
   /// [latex] enables `$...$` (inline) and `$$...$$` (block) math detection.
   /// When false (default), `$` is plain text — important so dollar amounts
   /// like `$10` don't accidentally start math mode.
-  static List<Token> tokenize(String text, {bool latex = false}) {
+  static List<Token> tokenize(String text, {bool latex = false, bool cjk = false}) {
     final out = <Token>[];
     final buf = StringBuffer();
     var i = 0;
+
+    // CJK punctuation chars that should be stripped from trailing autolinks.
+    const cjkTrailing = <int>{
+      0x3002, // 。
+      0x3001, // 、
+      0xFF01, // ！
+      0xFF1F, // ？
+      0xFF1A, // ：
+      0xFF1B, // ；
+      0x300C, // 「
+       0x300D, // 」
+    };
 
     void flushText() {
       if (buf.isNotEmpty) {
@@ -129,7 +141,8 @@ class InlineTokenizer {
               last == 0x3F /* ? */ ||
               last == 0x29 /* ) */ ||
               last == 0x3A /* : */ ||
-              last == 0x3B /* ; */ ) {
+              last == 0x3B /* ; */ ||
+              (cjk && cjkTrailing.contains(last))) {
             end--;
           } else {
             break;
@@ -212,10 +225,10 @@ class InlineTokenizer {
         // characters on BOTH sides (e.g. `macOS_System`, `foo_bar_baz`),
         // emit it as literal text instead of an emphasis delimiter.
         if (c == '_') {
-          final beforeIsWord =
-              i > 0 && _isWordChar(text.codeUnitAt(i - 1));
-          final afterIsWord = i + runLen < text.length &&
-              _isWordChar(text.codeUnitAt(i + runLen));
+            final beforeIsWord =
+                i > 0 && _isWordChar(text.codeUnitAt(i - 1), cjk: cjk);
+            final afterIsWord = i + runLen < text.length &&
+                _isWordChar(text.codeUnitAt(i + runLen), cjk: cjk);
           if (beforeIsWord && afterIsWord) {
             for (var k = 0; k < runLen; k++) {
               buf.write('_');
@@ -364,7 +377,20 @@ class _LinkParseResult {
   final int end;
 }
 
-bool _isWordChar(int code) {
+bool _isWordChar(int code, {bool cjk = false}) {
+  if (cjk) {
+    // CJK mode: exclude CJK ideographs and punctuation from word char
+    // detection so `_强调_` and `*强调*。` work as emphasis.
+    // CJK Unified Ideographs: U+4E00-U+9FFF, U+3400-U+4DBF
+    // CJK Symbols & Punctuation: U+3000-U+303F
+    // Fullwidth forms: U+FF00-U+FFEF (includes ！＂＃＄％＆＇（）＊＋，－．／：；＜＝＞？＠ etc.)
+    if ((code >= 0x3000 && code <= 0x303F) ||
+        (code >= 0x4E00 && code <= 0x9FFF) ||
+        (code >= 0x3400 && code <= 0x4DBF) ||
+        (code >= 0xFF00 && code <= 0xFFEF)) {
+      return false;
+    }
+  }
   return (code >= 0x30 && code <= 0x39) || // 0-9
       (code >= 0x41 && code <= 0x5A) || // A-Z
       (code >= 0x61 && code <= 0x7A) || // a-z
